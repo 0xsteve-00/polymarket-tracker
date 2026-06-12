@@ -1,5 +1,7 @@
 # 🐋 Polymarket Whale Tracker v2
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 Track large ("whale") trades on Polymarket, follow *smart money*, detect volume
 *spikes*, store trade history, and get **automatic alerts on Telegram/Discord** —
 running 24/7 via GitHub Actions, no PC required.
@@ -80,6 +82,14 @@ notifier.py          # Telegram + Discord
 smartmoney.py        # wallet scoring (PnL & win-rate)
 .github/workflows/tracker.yml   # scheduler
 ```
+
+## 🤝 Contributing
+This is an open-source project — issues and PRs are welcome!
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Good first ideas:
+new notification channels, better scoring, category filters, CSV export.
+
+## 📄 License
+[MIT](LICENSE) — free to use, modify, and distribute.
 
 ## ⚠️ Disclaimer
 This tool is for research & informational purposes only. Trading prediction
