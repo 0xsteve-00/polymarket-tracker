@@ -1,46 +1,86 @@
-# 🐋 Polymarket Whale Tracker
+# 🐋 Polymarket Whale Tracker v2
 
-Pantau trade gede ("whale") di Polymarket secara real-time, follow address tertentu,
-dan analisa portofolio sebuah wallet — buat bantu keputusan trading kamu.
+Pantau trade gede ("whale") di Polymarket, follow *smart money*, deteksi *spike*
+volume, simpan history, dan kirim **alert otomatis ke Telegram/Discord** — 24/7
+lewat GitHub Actions, tanpa PC nyala.
 
-**100% read-only & legit.** Cuma baca data publik dari Data API Polymarket
-(`data-api.polymarket.com`). Gak nyentuh / gak ngubah transaksi siapapun.
+> **100% read-only & legit.** Cuma baca data publik dari Polymarket Data API
+> (`data-api.polymarket.com`). Gak nyentuh / gak ngubah transaksi siapapun.
+> **Bukan jaminan profit — tetap DYOR.**
 
-## Cara pakai
+## ✨ Fitur
+1. 🔔 **Alert Telegram/Discord** — notif real-time tiap ada sinyal.
+2. ⏰ **Scheduler GitHub Actions** — jalan otomatis tiap 10 menit di cloud, gratis.
+3. 🧠 **Filter smart-money** — cuma alert wallet yg PnL & win-rate-nya bagus.
+4. 📈 **Deteksi spike/momentum** — alert kalau satu market tiba-tiba rame volume.
+5. 💾 **History database (SQLite)** — semua trade kerekam buat analisa/backtest.
+6. ⭐ **Watchlist & PnL tracking** — daftar wallet favorit + summary performa.
 
-Butuh Python 3 aja. **Gak perlu install apa-apa** (pakai library bawaan Python).
+## 🚀 Quick start
+Butuh **Python 3** saja. **Gak perlu install dependency** (pakai library bawaan Python).
 
 ```bash
-# 1. Scan trade terbaru, flag whale >= $1000
+git clone https://github.com/0xsteve-00/polymarket-tracker.git
+cd polymarket-tracker
+
+# Scan trade terbaru, flag whale >= $1000
 python3 whale_tracker.py scan --min-usd 1000
 
-# 2. Monitor real-time (refresh tiap 15 detik), alert whale >= $5000
-python3 whale_tracker.py watch --min-usd 5000 --interval 15
+# Monitor real-time + alert smart-money (kalau env alert di-set)
+python3 whale_tracker.py watch --min-usd 5000 --smart --min-pnl 5000 --min-winrate 0.55
 
-# 3. Follow address spesifik — alert tiap mereka trade (set min-usd 0)
-python3 whale_tracker.py watch --min-usd 0 --follow 0xabc...,0xdef...
+# Skor smart-money sebuah wallet
+python3 whale_tracker.py score 0xWALLET
 
-# 4. Analisa 1 wallet: saldo, posisi terbuka, PnL, trade terakhir
-python3 whale_tracker.py wallet 0xe8072d531800ee0d57f3951f85f15de9b30f4dc8
-
-# 5. Leaderboard trader tergede dari N trade terakhir
-python3 whale_tracker.py leaderboard --lookback 1000 --top 20
+# Watchlist
+python3 whale_tracker.py watchlist add 0xWALLET --label "OG trader"
+python3 whale_tracker.py watchlist pnl
 ```
 
-## Penjelasan kolom
-- **USD value** = `size` (jumlah share) × `price` (0..1). Ini nilai dolar trade-nya.
-- **BUY/SELL** = arah trade. **outcome** = sisi pasar yg dibeli (Yes/No/nama tim, dll).
-- **price** = harga per share saat itu, sekaligus implied probability (0.823 ≈ 82%).
+## 🔔 Setup alert (Telegram)
+1. Chat **@BotFather** di Telegram → `/newbot` → dapet **bot token**.
+2. Dapetin **chat id** kamu (chat ke **@userinfobot** atau **@RawDataBot**).
+3. Set env var (lokal):
+   ```bash
+   export TELEGRAM_BOT_TOKEN="123456:ABC..."
+   export TELEGRAM_CHAT_ID="123456789"
+   ```
+   (Discord opsional: bikin webhook di channel → set `DISCORD_WEBHOOK_URL`.)
+4. Test: `python3 whale_tracker.py poll --min-usd 2000`
 
-## Ide pemakaian buat trading
-- Jalanin `watch` di pasar yg lagi kamu pantau, set threshold sesuai gaya kamu.
-- Kalau ada whale masuk gede di satu outcome, itu sinyal sentimen — tapi **bukan
-  jaminan**. Tetap riset sendiri (DYOR).
-- Pakai `leaderboard` buat nemu wallet whale yg aktif, terus `wallet <addr>` buat
-  liat track record & posisi mereka, lalu `--follow` address-nya.
+Lihat `.env.example` buat contoh.
 
-## Catatan
-- Endpoint `/trades` ngambil sampai ~1000 trade terakhir per panggilan. Buat history
-  lebih jauh per-wallet, Polymarket batesin di sini.
-- Kalau mau dijadiin alert ke Telegram/Discord/Slack, tinggal sambung output `watch`
-  ke webhook — bisa aku bantu kalau mau.
+## ⏰ Jalan otomatis 24/7 (GitHub Actions)
+Workflow udah disiapin di `.github/workflows/tracker.yml` (jalan tiap 10 menit).
+
+Tinggal set **Secrets** di repo (`Settings → Secrets and variables → Actions`):
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `DISCORD_WEBHOOK_URL` *(opsional)*
+
+Selesai — Actions bakal nge-poll Polymarket tiap 10 menit & kirim alert ke kamu.
+DB (`tracker.db`) di-cache antar run biar gak dobel alert + bisa deteksi spike.
+Bisa juga trigger manual di tab **Actions → Run workflow**.
+
+## 🧠 Cara kerja filter
+- **whale**: `--min-usd` → trade dgn nilai USD (= share × price) di atas threshold.
+- **smart**: `--smart` + `--min-pnl`/`--min-winrate`/`--min-closed` → hanya wallet
+  yg realized PnL & win-rate historisnya lolos. Skor di-cache di DB (hemat API).
+- **watchlist**: tiap wallet di watchlist selalu di-alert apapun ukurannya.
+- **spike**: `--spike-usd` + `--spike-window` (menit) → 1 alert per market kalau
+  total volume window-nya nembus threshold. Dedup per window, gak spam.
+
+## 🗂️ Struktur
+```
+whale_tracker.py     # CLI utama (scan/watch/poll/wallet/leaderboard/score/watchlist)
+polymarket_api.py    # client read-only Polymarket Data API
+db.py                # SQLite (trades, alerts, scores, watchlist)
+notifier.py          # Telegram + Discord
+smartmoney.py        # scoring wallet (PnL & win-rate)
+.github/workflows/tracker.yml   # scheduler
+```
+
+## ⚠️ Disclaimer
+Tool ini cuma buat riset & informasi. Trading prediction market berisiko —
+keputusan & risikonya tanggung jawab kamu sendiri. Whale gede masuk = sinyal
+sentimen, **bukan** jaminan menang.
