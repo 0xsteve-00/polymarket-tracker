@@ -1,35 +1,35 @@
 # 🐋 Polymarket Whale Tracker v2
 
-Pantau trade gede ("whale") di Polymarket, follow *smart money*, deteksi *spike*
-volume, simpan history, dan kirim **alert otomatis ke Telegram/Discord** — 24/7
-lewat GitHub Actions, tanpa PC nyala.
+Track large ("whale") trades on Polymarket, follow *smart money*, detect volume
+*spikes*, store trade history, and get **automatic alerts on Telegram/Discord** —
+running 24/7 via GitHub Actions, no PC required.
 
-> **100% read-only & legit.** Cuma baca data publik dari Polymarket Data API
-> (`data-api.polymarket.com`). Gak nyentuh / gak ngubah transaksi siapapun.
-> **Bukan jaminan profit — tetap DYOR.**
+> **100% read-only & legit.** This tool only reads public data from the
+> Polymarket Data API (`data-api.polymarket.com`). It never touches or modifies
+> anyone's transactions. **Not financial advice — always DYOR.**
 
-## ✨ Fitur
-1. 🔔 **Alert Telegram/Discord** — notif real-time tiap ada sinyal.
-2. ⏰ **Scheduler GitHub Actions** — jalan otomatis tiap 10 menit di cloud, gratis.
-3. 🧠 **Filter smart-money** — cuma alert wallet yg PnL & win-rate-nya bagus.
-4. 📈 **Deteksi spike/momentum** — alert kalau satu market tiba-tiba rame volume.
-5. 💾 **History database (SQLite)** — semua trade kerekam buat analisa/backtest.
-6. ⭐ **Watchlist & PnL tracking** — daftar wallet favorit + summary performa.
+## ✨ Features
+1. 🔔 **Telegram/Discord alerts** — real-time notifications for every signal.
+2. ⏰ **GitHub Actions scheduler** — runs automatically every 10 minutes in the cloud, for free.
+3. 🧠 **Smart-money filter** — only alert on wallets with strong PnL & win-rate.
+4. 📈 **Spike/momentum detection** — alert when a market suddenly heats up in volume.
+5. 💾 **History database (SQLite)** — every trade recorded for analysis/backtesting.
+6. ⭐ **Watchlist & PnL tracking** — favorite wallets list + performance summary.
 
 ## 🚀 Quick start
-Butuh **Python 3** saja. **Gak perlu install dependency** (pakai library bawaan Python).
+Requires **Python 3** only. **No dependencies to install** (uses Python's standard library).
 
 ```bash
 git clone https://github.com/0xsteve-00/polymarket-tracker.git
 cd polymarket-tracker
 
-# Scan trade terbaru, flag whale >= $1000
+# Scan recent trades, flag whales >= $1000
 python3 whale_tracker.py scan --min-usd 1000
 
-# Monitor real-time + alert smart-money (kalau env alert di-set)
+# Real-time monitor + smart-money alerts (if alert env vars are set)
 python3 whale_tracker.py watch --min-usd 5000 --smart --min-pnl 5000 --min-winrate 0.55
 
-# Skor smart-money sebuah wallet
+# Smart-money score for a wallet
 python3 whale_tracker.py score 0xWALLET
 
 # Watchlist
@@ -37,50 +37,51 @@ python3 whale_tracker.py watchlist add 0xWALLET --label "OG trader"
 python3 whale_tracker.py watchlist pnl
 ```
 
-## 🔔 Setup alert (Telegram)
-1. Chat **@BotFather** di Telegram → `/newbot` → dapet **bot token**.
-2. Dapetin **chat id** kamu (chat ke **@userinfobot** atau **@RawDataBot**).
-3. Set env var (lokal):
+## 🔔 Alert setup (Telegram)
+1. Chat with **@BotFather** on Telegram → `/newbot` → get your **bot token**.
+2. Get your **chat id** (message **@userinfobot** or **@RawDataBot**).
+3. Set env vars (local):
    ```bash
    export TELEGRAM_BOT_TOKEN="123456:ABC..."
    export TELEGRAM_CHAT_ID="123456789"
    ```
-   (Discord opsional: bikin webhook di channel → set `DISCORD_WEBHOOK_URL`.)
-4. Test: `python3 whale_tracker.py poll --min-usd 2000`
+   (Discord optional: create a channel webhook → set `DISCORD_WEBHOOK_URL`.)
+4. Test it: `python3 whale_tracker.py poll --min-usd 2000`
 
-Lihat `.env.example` buat contoh.
+See `.env.example` for a template.
 
-## ⏰ Jalan otomatis 24/7 (GitHub Actions)
-Workflow udah disiapin di `.github/workflows/tracker.yml` (jalan tiap 10 menit).
+## ⏰ Run 24/7 (GitHub Actions)
+The workflow is ready at `.github/workflows/tracker.yml` (runs every 10 minutes).
 
-Tinggal set **Secrets** di repo (`Settings → Secrets and variables → Actions`):
+Just set **Secrets** in the repo (`Settings → Secrets and variables → Actions`):
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
-- `DISCORD_WEBHOOK_URL` *(opsional)*
+- `DISCORD_WEBHOOK_URL` *(optional)*
 
-Selesai — Actions bakal nge-poll Polymarket tiap 10 menit & kirim alert ke kamu.
-DB (`tracker.db`) di-cache antar run biar gak dobel alert + bisa deteksi spike.
-Bisa juga trigger manual di tab **Actions → Run workflow**.
+That's it — Actions will poll Polymarket every 10 minutes and send alerts to you.
+The DB (`tracker.db`) is cached between runs to avoid duplicate alerts and to
+enable spike detection. You can also trigger it manually from the **Actions →
+Run workflow** tab.
 
-## 🧠 Cara kerja filter
-- **whale**: `--min-usd` → trade dgn nilai USD (= share × price) di atas threshold.
-- **smart**: `--smart` + `--min-pnl`/`--min-winrate`/`--min-closed` → hanya wallet
-  yg realized PnL & win-rate historisnya lolos. Skor di-cache di DB (hemat API).
-- **watchlist**: tiap wallet di watchlist selalu di-alert apapun ukurannya.
-- **spike**: `--spike-usd` + `--spike-window` (menit) → 1 alert per market kalau
-  total volume window-nya nembus threshold. Dedup per window, gak spam.
+## 🧠 How the filters work
+- **whale**: `--min-usd` → trades with USD value (= shares × price) above the threshold.
+- **smart**: `--smart` + `--min-pnl`/`--min-winrate`/`--min-closed` → only wallets
+  whose historical realized PnL & win-rate pass. Scores are cached in the DB (saves API calls).
+- **watchlist**: every wallet on the watchlist is always alerted, regardless of size.
+- **spike**: `--spike-usd` + `--spike-window` (minutes) → one alert per market when
+  total volume in the window crosses the threshold. Deduped per window, no spam.
 
-## 🗂️ Struktur
+## 🗂️ Structure
 ```
-whale_tracker.py     # CLI utama (scan/watch/poll/wallet/leaderboard/score/watchlist)
-polymarket_api.py    # client read-only Polymarket Data API
+whale_tracker.py     # main CLI (scan/watch/poll/wallet/leaderboard/score/watchlist)
+polymarket_api.py    # read-only Polymarket Data API client
 db.py                # SQLite (trades, alerts, scores, watchlist)
 notifier.py          # Telegram + Discord
-smartmoney.py        # scoring wallet (PnL & win-rate)
+smartmoney.py        # wallet scoring (PnL & win-rate)
 .github/workflows/tracker.yml   # scheduler
 ```
 
 ## ⚠️ Disclaimer
-Tool ini cuma buat riset & informasi. Trading prediction market berisiko —
-keputusan & risikonya tanggung jawab kamu sendiri. Whale gede masuk = sinyal
-sentimen, **bukan** jaminan menang.
+This tool is for research & informational purposes only. Trading prediction
+markets is risky — all decisions and risks are your own responsibility. A big
+whale entering a market is a sentiment signal, **not** a guarantee of winning.
