@@ -116,3 +116,54 @@ def watchlist_remove(conn, wallet):
 
 def watchlist_all(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM watchlist ORDER BY added_at").fetchall()]
+
+
+# ---- consensus (multiple wallets buying the same side) ----
+def consensus_groups(conn, since_ts, min_usd, min_wallets):
+    """Markets where >= min_wallets distinct wallets BOUGHT the same outcome."""
+    rows = conn.execute(
+        """SELECT condition_id, outcome, MAX(title) title,
+                  COUNT(DISTINCT wallet) n_wallets, SUM(usd) vol
+           FROM trades
+           WHERE ts>=? AND usd>=? AND side='BUY'
+           GROUP BY condition_id, outcome
+           HAVING COUNT(DISTINCT wallet) >= ?
+           ORDER BY vol DESC""",
+        (since_ts, min_usd, min_wallets)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def consensus_wallets(conn, condition_id, outcome, since_ts, min_usd, limit=5):
+    rows = conn.execute(
+        """SELECT wallet, MAX(name) name, SUM(usd) vol
+           FROM trades
+           WHERE condition_id=? AND outcome=? AND ts>=? AND usd>=? AND side='BUY'
+           GROUP BY wallet ORDER BY vol DESC LIMIT ?""",
+        (condition_id, outcome, since_ts, min_usd, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---- digest ----
+def digest_stats(conn, since_ts):
+    total = conn.execute(
+        "SELECT COALESCE(SUM(usd),0) v, COUNT(*) n, COUNT(DISTINCT wallet) w FROM trades WHERE ts>=?",
+        (since_ts,)).fetchone()
+    top_trades = conn.execute(
+        "SELECT * FROM trades WHERE ts>=? ORDER BY usd DESC LIMIT 5", (since_ts,)).fetchall()
+    top_markets = conn.execute(
+        """SELECT condition_id, MAX(title) title, SUM(usd) vol, COUNT(*) n
+           FROM trades WHERE ts>=? GROUP BY condition_id ORDER BY vol DESC LIMIT 5""",
+        (since_ts,)).fetchall()
+    top_wallets = conn.execute(
+        """SELECT wallet, MAX(name) name, SUM(usd) vol, COUNT(*) n
+           FROM trades WHERE ts>=? GROUP BY wallet ORDER BY vol DESC LIMIT 5""",
+        (since_ts,)).fetchall()
+    n_alerts = conn.execute(
+        "SELECT COUNT(*) c FROM alerts WHERE alerted_at>=?", (since_ts,)).fetchone()["c"]
+    return {
+        "volume": total["v"], "n_trades": total["n"], "n_wallets": total["w"],
+        "top_trades": [dict(r) for r in top_trades],
+        "top_markets": [dict(r) for r in top_markets],
+        "top_wallets": [dict(r) for r in top_wallets],
+        "n_alerts": n_alerts,
+    }
