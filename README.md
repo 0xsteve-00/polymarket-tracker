@@ -17,6 +17,8 @@ running 24/7 via GitHub Actions, no PC required.
 4. 📈 **Spike/momentum detection** — alert when a market suddenly heats up in volume.
 5. 💾 **History database (SQLite)** — every trade recorded for analysis/backtesting.
 6. ⭐ **Watchlist & PnL tracking** — favorite wallets list + performance summary.
+7. 🎯 **Smart-money consensus** — strongest signal: alert when several whales buy the *same side* of the same market.
+8. 📊 **Daily digest** — summary of top trades, hottest markets, and top whales, sent to Telegram/Discord.
 
 ## 🚀 Quick start
 Requires **Python 3** only. **No dependencies to install** (uses Python's standard library).
@@ -37,6 +39,12 @@ python3 whale_tracker.py score 0xWALLET
 # Watchlist
 python3 whale_tracker.py watchlist add 0xWALLET --label "OG trader"
 python3 whale_tracker.py watchlist pnl
+
+# Markets where >=3 whales bought the same side in the last hour
+python3 whale_tracker.py consensus --wallets 3 --min-usd 1000 --window 60
+
+# 24h summary (add --send to push it to Telegram/Discord)
+python3 whale_tracker.py digest --hours 24 --send
 ```
 
 ## 🔔 Alert setup (Telegram)
@@ -72,6 +80,9 @@ Run workflow** tab.
 - **watchlist**: every wallet on the watchlist is always alerted, regardless of size.
 - **spike**: `--spike-usd` + `--spike-window` (minutes) → one alert per market when
   total volume in the window crosses the threshold. Deduped per window, no spam.
+- **consensus**: `--consensus-wallets N` (in `poll`) → alert when N+ distinct wallets
+  buy the same outcome of one market within `--consensus-window` minutes. Several
+  independent whales agreeing on one side is the strongest signal this tool tracks.
 
 ## 🗂️ Structure
 ```
