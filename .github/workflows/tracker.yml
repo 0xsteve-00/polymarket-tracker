@@ -1,0 +1,48 @@
+name: Polymarket Whale Tracker
+
+# Jalan otomatis tiap 10 menit + bisa di-trigger manual.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      min_usd:
+        description: "Minimal USD buat dianggap whale"
+        default: "5000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whale-tracker
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Persist tracker.db antar run (buat dedup alert + deteksi spike)
+      - name: Restore DB cache
+        uses: actions/cache@v4
+        with:
+          path: tracker.db
+          key: tracker-db-${{ github.run_id }}
+          restore-keys: |
+            tracker-db-
+
+      - name: Run poll
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python3 whale_tracker.py poll \
+            --min-usd "${{ github.event.inputs.min_usd || '5000' }}" \
+            --smart --min-pnl 5000 --min-winrate 0.55 \
+            --spike-usd 25000 --spike-window 30
