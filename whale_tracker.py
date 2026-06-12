@@ -14,6 +14,8 @@ Commands:
   leaderboard  Top trader by volume dari N trade terakhir
   score        Skor smart-money sebuah wallet (PnL & win-rate)
   watchlist    Kelola daftar wallet favorit (add/remove/list/pnl)
+  consensus    Cari market di mana beberapa whale beli sisi yang sama
+  digest       Ringkasan periode (top whale, market terpanas) + kirim ke alert
 
 Contoh:
   python3 whale_tracker.py scan --min-usd 1000
@@ -63,7 +65,8 @@ def trade_line(t):
 def alert_text(t, reasons, score=None):
     arrow = "🟢 *BUY*" if t.get("side") == "BUY" else "🔴 *SELL*"
     tags = " ".join({"whale": "🐋WHALE", "smart": "🧠SMART-MONEY",
-                     "watchlist": "⭐WATCHLIST", "spike": "📈SPIKE"}.get(r, r) for r in reasons)
+                     "watchlist": "⭐WATCHLIST", "spike": "📈SPIKE",
+                     "consensus": "🎯CONSENSUS"}.get(r, r) for r in reasons)
     lines = [
         f"{tags}",
         f"{arrow} {fmt_money(usd(t))}  @ {float(t.get('price',0)):.3f} ({float(t.get('price',0))*100:.0f}%)",
@@ -167,9 +170,81 @@ def cmd_poll(args):
             DB.mark_alerted(conn, key, "spike")
             new_alerts += 1
             print(f"ALERT [spike] {titles.get(cid,'?')[:50]} vol={fmt_money(vol)} -> {chans or 'terminal'}")
+    # 3) smart-money consensus: several whales buying the same side of one market
+    if args.consensus_wallets > 0:
+        bucket = int(time.time()) // (args.consensus_window * 60)
+        since = int(time.time()) - args.consensus_window * 60
+        for g in DB.consensus_groups(conn, since, args.consensus_min_usd, args.consensus_wallets):
+            key = f"consensus:{g['condition_id']}:{g['outcome']}:{bucket}"
+            if DB.already_alerted(conn, key):
+                continue
+            buyers = DB.consensus_wallets(conn, g["condition_id"], g["outcome"],
+                                          since, args.consensus_min_usd)
+            who = "\n".join(f"  • {b['name'] or short(b['wallet'])} — {fmt_money(b['vol'])}"
+                            for b in buyers)
+            txt = (f"🎯 *CONSENSUS* — {g['n_wallets']} whales beli *{g['outcome']}* "
+                   f"dalam {args.consensus_window} menit (total {fmt_money(g['vol'])})\n"
+                   f"*{g['title']}*\n{who}\nSinyal kuat: smart money sepakat satu arah!")
+            chans = notifier.notify(txt)
+            DB.mark_alerted(conn, key, "consensus")
+            new_alerts += 1
+            print(f"ALERT [consensus] {g['title'][:50]} {g['n_wallets']}x {g['outcome']} -> {chans or 'terminal'}")
     conn.commit()
     conn.close()
     print(f"\n✅ poll done. {len(trades)} trades scanned, {new_alerts} new alerts sent.")
+
+
+def cmd_consensus(args):
+    """Find markets where several whales bought the same outcome recently."""
+    conn = DB.connect(args.db)
+    trades = fetch_trades(limit=args.lookback)
+    for t in trades:
+        DB.insert_trade(conn, t, usd(t))
+    conn.commit()
+    since = int(time.time()) - args.window * 60
+    groups = DB.consensus_groups(conn, since, args.min_usd, args.wallets)
+    print(f"\n🎯 CONSENSUS — market dgn >= {args.wallets} wallet beli sisi sama "
+          f"(trade >= {fmt_money(args.min_usd)}, window {args.window} menit)\n" + "-" * 96)
+    if not groups:
+        print("(belum ada — coba perpanjang --window atau turunin --min-usd)")
+    for g in groups[: args.top]:
+        print(f"\n  {g['n_wallets']} wallets → *{g['outcome']}*  |  total {fmt_money(g['vol'])}")
+        print(f"  {g['title']}")
+        for b in DB.consensus_wallets(conn, g["condition_id"], g["outcome"], since, args.min_usd):
+            print(f"    • {(b['name'] or short(b['wallet']))[:24]:<24} {fmt_money(b['vol']):>12}")
+    print()
+    conn.close()
+
+
+def cmd_digest(args):
+    """Periodic summary of stored history. --send pushes it to Telegram/Discord."""
+    conn = DB.connect(args.db)
+    since = int(time.time()) - args.hours * 3600
+    s = DB.digest_stats(conn, since)
+    lines = [f"📊 *WHALE DIGEST — last {args.hours}h*",
+             f"Volume tracked: {fmt_money(s['volume'])}  |  {s['n_trades']} trades  |  "
+             f"{s['n_wallets']} wallets  |  {s['n_alerts']} alerts sent", ""]
+    if s["top_trades"]:
+        lines.append("🐋 *Top trades:*")
+        for t in s["top_trades"]:
+            side = "🟢" if t["side"] == "BUY" else "🔴"
+            lines.append(f"  {side} {fmt_money(t['usd'])} — {t['outcome']} @ {t['price']:.2f} | "
+                         f"{(t['title'] or '')[:48]}")
+    if s["top_markets"]:
+        lines.append("\n🔥 *Hottest markets:*")
+        for m in s["top_markets"]:
+            lines.append(f"  {fmt_money(m['vol'])} ({m['n']} trades) | {(m['title'] or '')[:48]}")
+    if s["top_wallets"]:
+        lines.append("\n🏆 *Top whales:*")
+        for w in s["top_wallets"]:
+            lines.append(f"  {fmt_money(w['vol'])} ({w['n']} trades) — "
+                         f"{w['name'] or short(w['wallet'])}")
+    text = "\n".join(lines)
+    print("\n" + text + "\n")
+    if args.send:
+        chans = notifier.notify(text)
+        print(f"→ sent to: {chans or 'no channels configured'}")
+    conn.close()
 
 
 def _evaluate(conn, t, args, follow, score_cache):
@@ -322,7 +397,27 @@ def main():
     pl.add_argument("--spike-usd", type=float, default=0, help="alert market kalau volume window >= ini")
     pl.add_argument("--spike-window", type=int, default=30, help="menit")
     pl.add_argument("--spike-trades", type=int, default=3)
+    pl.add_argument("--consensus-wallets", type=int, default=0,
+                    help="alert kalau >= N wallet beli sisi sama (0=off)")
+    pl.add_argument("--consensus-window", type=int, default=60, help="menit")
+    pl.add_argument("--consensus-min-usd", type=float, default=1000,
+                    help="minimal USD per trade buat dihitung di consensus")
     pl.set_defaults(func=cmd_poll)
+
+    cs = sub.add_parser("consensus")
+    cs.add_argument("--wallets", type=int, default=3, help="minimal jumlah wallet")
+    cs.add_argument("--min-usd", type=float, default=1000)
+    cs.add_argument("--window", type=int, default=60, help="menit")
+    cs.add_argument("--lookback", type=int, default=1000)
+    cs.add_argument("--top", type=int, default=10)
+    cs.add_argument("--db", type=str, default="tracker.db")
+    cs.set_defaults(func=cmd_consensus)
+
+    dg = sub.add_parser("digest")
+    dg.add_argument("--hours", type=int, default=24)
+    dg.add_argument("--send", action="store_true", help="kirim ke Telegram/Discord")
+    dg.add_argument("--db", type=str, default="tracker.db")
+    dg.set_defaults(func=cmd_digest)
 
     wl = sub.add_parser("wallet"); wl.add_argument("address"); wl.set_defaults(func=cmd_wallet)
 
