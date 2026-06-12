@@ -1,155 +1,240 @@
 #!/usr/bin/env python3
 """
-Polymarket Whale Tracker
-========================
-Pantau trade gede ("whale") di Polymarket secara real-time, follow address
-tertentu, dan analisa portofolio sebuah wallet. Read-only & legit — cuma baca
-data publik dari Data API Polymarket, gak nyentuh transaksi siapapun.
+🐋 Polymarket Whale Tracker v2  (read-only & legit)
+==================================================
+Pantau trade gede di Polymarket, follow smart-money, deteksi spike, simpan
+history, dan kirim alert ke Telegram/Discord. Cuma baca data publik Polymarket
+Data API — gak nyentuh transaksi siapapun.
 
-Pakai:
-  # 1. Sekali scan trade terbaru, flag whale >= $1000
-  python whale_tracker.py scan --min-usd 1000
+Commands:
+  scan         Sekali scan trade terbaru, flag whale
+  watch        Monitor real-time di terminal (loop)
+  poll         Sekali jalan: simpan ke DB + kirim alert (buat cron / GitHub Actions)
+  wallet       Analisa 1 wallet (saldo, posisi, PnL, trade terakhir)
+  leaderboard  Top trader by volume dari N trade terakhir
+  score        Skor smart-money sebuah wallet (PnL & win-rate)
+  watchlist    Kelola daftar wallet favorit (add/remove/list/pnl)
 
-  # 2. Monitor terus-terusan (real-time), refresh tiap 15 detik
-  python whale_tracker.py watch --min-usd 5000 --interval 15
+Contoh:
+  python3 whale_tracker.py scan --min-usd 1000
+  python3 whale_tracker.py watch --min-usd 5000 --smart --min-pnl 5000 --min-winrate 0.55
+  python3 whale_tracker.py poll --min-usd 5000 --smart --spike-usd 20000
+  python3 whale_tracker.py wallet 0xABC...
+  python3 whale_tracker.py watchlist add 0xABC... --label "OG trader"
+  python3 whale_tracker.py watchlist pnl
 
-  # 3. Follow address spesifik (alert tiap mereka trade)
-  python whale_tracker.py watch --min-usd 0 --follow 0xabc...,0xdef...
-
-  # 4. Analisa 1 wallet (saldo, posisi, PnL, trade terakhir)
-  python whale_tracker.py wallet 0xe8072d531800ee0d57f3951f85f15de9b30f4dc8
-
-  # 5. Leaderboard: trader tergede dari N trade terakhir
-  python whale_tracker.py leaderboard --lookback 1000
+Alert config (env var):
+  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DISCORD_WEBHOOK_URL
 """
 import argparse
-import json
 import sys
 import time
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 
-BASE = "https://data-api.polymarket.com"
+import db as DB
+import notifier
+from polymarket_api import fetch_trades, fetch_positions, fetch_value, usd, trade_key
+from smartmoney import score_wallet, is_smart
 
 
-def _get(path, params=None):
-    url = f"{BASE}{path}"
-    if params:
-        url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "polymarket-whale-tracker/1.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def fetch_trades(limit=500, offset=0):
-    """Recent trades across all markets. size=shares, price=0..1, USD=size*price."""
-    return _get("/trades", {"limit": limit, "offset": offset})
-
-
-def fetch_positions(wallet, limit=100):
-    return _get("/positions", {"user": wallet, "limit": limit, "sortBy": "CURRENT", "sortDirection": "DESC"})
-
-
-def fetch_value(wallet):
-    data = _get("/value", {"user": wallet})
-    return data[0]["value"] if data else 0.0
-
-
-def usd(trade):
-    return float(trade.get("size", 0)) * float(trade.get("price", 0))
-
-
+# ----------------------------- formatting -----------------------------
 def fmt_money(x):
     return f"${x:,.2f}"
 
 
-def short_addr(a):
+def short(a):
     return f"{a[:6]}...{a[-4:]}" if a and len(a) > 12 else a
 
 
 def ts_str(ts):
-    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def name_of(t):
+    return t.get("name") or t.get("pseudonym") or short(t.get("proxyWallet", ""))
 
 
 def trade_line(t):
-    name = t.get("name") or t.get("pseudonym") or short_addr(t.get("proxyWallet", ""))
-    side = t.get("side", "?")
-    arrow = "🟢 BUY " if side == "BUY" else "🔴 SELL"
-    return (
-        f"{arrow} {fmt_money(usd(t)):>12}  {name[:22]:<22}  "
-        f"{t.get('outcome','?'):<6} @ {float(t.get('price',0)):.3f}  | {t.get('title','')[:55]}"
-    )
+    arrow = "🟢 BUY " if t.get("side") == "BUY" else "🔴 SELL"
+    return (f"{arrow} {fmt_money(usd(t)):>12}  {name_of(t)[:20]:<20}  "
+            f"{(t.get('outcome') or '?')[:8]:<8} @ {float(t.get('price',0)):.3f} | {(t.get('title') or '')[:50]}")
 
 
+def alert_text(t, reasons, score=None):
+    arrow = "🟢 *BUY*" if t.get("side") == "BUY" else "🔴 *SELL*"
+    tags = " ".join({"whale": "🐋WHALE", "smart": "🧠SMART-MONEY",
+                     "watchlist": "⭐WATCHLIST", "spike": "📈SPIKE"}.get(r, r) for r in reasons)
+    lines = [
+        f"{tags}",
+        f"{arrow} {fmt_money(usd(t))}  @ {float(t.get('price',0)):.3f} ({float(t.get('price',0))*100:.0f}%)",
+        f"*{t.get('title','')}*",
+        f"Outcome: *{t.get('outcome','?')}*  |  Trader: `{name_of(t)}`",
+    ]
+    if score:
+        lines.append(f"Trader stats: PnL {fmt_money(score['realized_pnl'])} | "
+                     f"winrate {score['winrate']*100:.0f}% ({score['n_closed']} closed)")
+    wallet = t.get("proxyWallet", "")
+    lines.append(f"https://polymarket.com/profile/{wallet}")
+    return "\n".join(lines)
+
+
+# ----------------------------- commands -----------------------------
 def cmd_scan(args):
     trades = fetch_trades(limit=args.lookback)
-    if args.follow:
-        follow = {a.strip().lower() for a in args.follow.split(",") if a.strip()}
-        trades = [t for t in trades if t.get("proxyWallet", "").lower() in follow]
     whales = [t for t in trades if usd(t) >= args.min_usd]
     whales.sort(key=usd, reverse=True)
     print(f"\n🐋 WHALE SCAN — {len(whales)} trade >= {fmt_money(args.min_usd)} "
-          f"(dari {len(trades)} trade terakhir)\n" + "-" * 110)
+          f"(dari {len(trades)} terakhir)\n" + "-" * 104)
     for t in whales[: args.top]:
         print(trade_line(t))
-    total = sum(usd(t) for t in whales)
-    print("-" * 110)
-    print(f"Total volume whale: {fmt_money(total)}\n")
-    return whales
+    print("-" * 104)
+    print(f"Total volume whale: {fmt_money(sum(usd(t) for t in whales))}\n")
 
 
 def cmd_watch(args):
+    conn = DB.connect(args.db)
     follow = {a.strip().lower() for a in args.follow.split(",") if a.strip()} if args.follow else None
     seen = set()
-    print(f"👀 WATCHING Polymarket — min {fmt_money(args.min_usd)}"
-          + (f", follow {len(follow)} wallet" if follow else "")
-          + f", refresh {args.interval}s. Ctrl+C buat stop.\n")
+    score_cache = {}
+    chans = notifier.configured()
+    print(f"👀 WATCH — min {fmt_money(args.min_usd)}"
+          + (f", smart-money(PnL>={fmt_money(args.min_pnl)},WR>={args.min_winrate})" if args.smart else "")
+          + (f", follow {len(follow)}" if follow else "")
+          + (f", alerts→{chans}" if chans else ", alerts→terminal only")
+          + f", every {args.interval}s. Ctrl+C to stop.\n")
     try:
         while True:
             try:
                 trades = fetch_trades(limit=args.lookback)
             except Exception as e:
-                print(f"⚠️  fetch error: {e}", file=sys.stderr)
+                print(f"⚠️ fetch error: {e}", file=sys.stderr)
                 time.sleep(args.interval)
                 continue
-            new = []
-            for t in trades:
-                key = t.get("transactionHash", "") + t.get("asset", "") + str(t.get("timestamp"))
-                if key in seen:
+            for t in sorted(trades, key=lambda x: x.get("timestamp", 0)):
+                k = trade_key(t)
+                if k in seen:
                     continue
-                seen.add(key)
-                if follow and t.get("proxyWallet", "").lower() not in follow:
-                    continue
-                if usd(t) >= args.min_usd:
-                    new.append(t)
-            new.sort(key=lambda x: x.get("timestamp", 0))
-            for t in new:
-                print(f"[{ts_str(t.get('timestamp'))}] {trade_line(t)}")
-            if len(seen) > 20000:  # keep memory bounded
+                seen.add(k)
+                DB.insert_trade(conn, t, usd(t))
+                reasons, score = _evaluate(conn, t, args, follow, score_cache)
+                if reasons:
+                    print(f"[{ts_str(t.get('timestamp'))}] {trade_line(t)}  <= {','.join(reasons)}")
+                    if chans:
+                        notifier.notify(alert_text(t, reasons, score))
+            conn.commit()
+            if len(seen) > 20000:
                 seen = set(list(seen)[-10000:])
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\n👋 Stopped.")
+    finally:
+        conn.commit()
+        conn.close()
+
+
+def cmd_poll(args):
+    """One-shot: store trades, evaluate, send alerts for NEW hits. For cron/Actions."""
+    conn = DB.connect(args.db)
+    follow = _watchlist_set(conn)
+    score_cache = {}
+    trades = fetch_trades(limit=args.lookback)
+    # store first so spike volume is computed against full history
+    for t in trades:
+        DB.insert_trade(conn, t, usd(t))
+    conn.commit()
+    new_alerts = 0
+    # 1) per-trade alerts (whale / smart-money / watchlist)
+    for t in sorted(trades, key=lambda x: x.get("timestamp", 0)):
+        k = trade_key(t)
+        reasons, score = _evaluate(conn, t, args, follow, score_cache)
+        if not reasons or DB.already_alerted(conn, k):
+            continue
+        chans = notifier.notify(alert_text(t, reasons, score))
+        DB.mark_alerted(conn, k, ",".join(reasons))
+        new_alerts += 1
+        print(f"ALERT [{','.join(reasons)}] {trade_line(t)} -> {chans or 'terminal'}")
+    # 2) one market-level spike alert per market per window (no per-trade spam)
+    if args.spike_usd > 0:
+        bucket = int(time.time()) // (args.spike_window * 60)
+        titles = {t.get("conditionId"): t.get("title") for t in trades}
+        for cid, vol in _spike_markets(conn, trades, args).items():
+            key = f"spike:{cid}:{bucket}"
+            if DB.already_alerted(conn, key):
+                continue
+            txt = (f"📈 *SPIKE* — volume {fmt_money(vol)} dalam {args.spike_window} menit terakhir\n"
+                   f"*{titles.get(cid,'?')}*\nMarket lagi rame, cek pergerakannya!")
+            chans = notifier.notify(txt)
+            DB.mark_alerted(conn, key, "spike")
+            new_alerts += 1
+            print(f"ALERT [spike] {titles.get(cid,'?')[:50]} vol={fmt_money(vol)} -> {chans or 'terminal'}")
+    conn.commit()
+    conn.close()
+    print(f"\n✅ poll done. {len(trades)} trades scanned, {new_alerts} new alerts sent.")
+
+
+def _evaluate(conn, t, args, follow, score_cache):
+    """Return (reasons, score_or_None) for a trade given the active filters."""
+    reasons = []
+    wallet = (t.get("proxyWallet") or "").lower()
+    v = usd(t)
+    if follow and wallet in follow:
+        reasons.append("watchlist")
+    if v >= args.min_usd:
+        # whale by size; optionally also require smart-money
+        if args.smart:
+            score = score_cache.get(wallet)
+            if score is None:
+                cached = DB.get_score(conn, wallet)
+                if cached:
+                    score = cached
+                else:
+                    try:
+                        score = score_wallet(wallet)
+                        DB.save_score(conn, wallet, score)
+                    except Exception:
+                        score = None
+                score_cache[wallet] = score
+            if score and is_smart(score, args.min_pnl, args.min_winrate, args.min_closed):
+                reasons.append("smart")
+            elif not reasons:  # not watchlist, didn't pass smart -> skip
+                return [], score
+            return (reasons + (["whale"] if "smart" in reasons else [])), score
+        else:
+            reasons.append("whale")
+    return reasons, score_cache.get(wallet)
+
+
+def _spike_markets(conn, trades, args):
+    """Detect markets with high recent volume. Returns {condition_id: volume}."""
+    since = int(time.time()) - args.spike_window * 60
+    markets = {t.get("conditionId") for t in trades if t.get("conditionId")}
+    hits = {}
+    for cid in markets:
+        vol, n = DB.market_volume_since(conn, cid, since)
+        if vol >= args.spike_usd and n >= args.spike_trades:
+            hits[cid] = vol
+    return hits
+
+
+def _watchlist_set(conn):
+    return {w["wallet"] for w in DB.watchlist_all(conn)}
 
 
 def cmd_wallet(args):
     w = args.address
     val = fetch_value(w)
     positions = fetch_positions(w, limit=200)
-    trades = [t for t in fetch_trades(limit=1000) if t.get("proxyWallet", "").lower() == w.lower()]
+    trades = [t for t in fetch_trades(limit=1000) if (t.get("proxyWallet") or "").lower() == w.lower()]
     open_pos = [p for p in positions if float(p.get("currentValue", 0)) > 0.01]
     total_pnl = sum(float(p.get("cashPnl", 0)) for p in positions)
-    print(f"\n💼 WALLET {w}")
-    print("-" * 90)
+    print(f"\n💼 WALLET {w}\n" + "-" * 88)
     print(f"Saldo posisi sekarang : {fmt_money(val)}")
     print(f"Total PnL (all-time)  : {fmt_money(total_pnl)}")
     print(f"Posisi terbuka        : {len(open_pos)}")
-    print("\nTop posisi terbuka (by value):")
+    print("\nTop posisi terbuka:")
     for p in sorted(open_pos, key=lambda x: float(x.get("currentValue", 0)), reverse=True)[:10]:
-        pnl = float(p.get("cashPnl", 0))
-        print(f"  {fmt_money(float(p.get('currentValue',0))):>12}  "
-              f"PnL {fmt_money(pnl):>12}  {p.get('outcome','?'):<6} | {p.get('title','')[:50]}")
+        print(f"  {fmt_money(float(p.get('currentValue',0))):>12}  PnL {fmt_money(float(p.get('cashPnl',0))):>12}"
+              f"  {(p.get('outcome') or '?')[:8]:<8} | {(p.get('title') or '')[:46]}")
     print("\nTrade terakhir:")
     for t in sorted(trades, key=lambda x: x.get("timestamp", 0), reverse=True)[:10]:
         print(f"  [{ts_str(t.get('timestamp'))}] {trade_line(t)}")
@@ -161,44 +246,96 @@ def cmd_leaderboard(args):
     agg = {}
     for t in trades:
         w = t.get("proxyWallet", "")
-        a = agg.setdefault(w, {"name": t.get("name") or t.get("pseudonym") or short_addr(w),
-                               "vol": 0.0, "n": 0})
-        a["vol"] += usd(t)
-        a["n"] += 1
+        a = agg.setdefault(w, {"name": name_of(t), "vol": 0.0, "n": 0})
+        a["vol"] += usd(t); a["n"] += 1
     ranked = sorted(agg.items(), key=lambda kv: kv[1]["vol"], reverse=True)
-    print(f"\n🏆 LEADERBOARD — top trader dari {len(trades)} trade terakhir\n" + "-" * 80)
-    print(f"{'#':>2}  {'Volume':>14}  {'Trades':>6}  {'Trader':<22}  Wallet")
+    print(f"\n🏆 LEADERBOARD — dari {len(trades)} trade terakhir\n" + "-" * 80)
+    print(f"{'#':>2}  {'Volume':>14}  {'Trades':>6}  {'Trader':<20}  Wallet")
     for i, (w, a) in enumerate(ranked[: args.top], 1):
-        print(f"{i:>2}  {fmt_money(a['vol']):>14}  {a['n']:>6}  {a['name'][:22]:<22}  {short_addr(w)}")
+        print(f"{i:>2}  {fmt_money(a['vol']):>14}  {a['n']:>6}  {a['name'][:20]:<20}  {short(w)}")
     print()
 
 
+def cmd_score(args):
+    s = score_wallet(args.address)
+    print(f"\n🧠 SMART-MONEY SCORE — {args.address}\n" + "-" * 60)
+    print(f"Realized PnL : {fmt_money(s['realized_pnl'])}")
+    print(f"Win rate     : {s['winrate']*100:.1f}%  ({s['n_closed']} closed positions)")
+    print(f"Open value   : {fmt_money(s['cur_value'])}")
+    verdict = "✅ SMART MONEY" if is_smart(s, 1000, 0.5, 5) else "⚠️ belum lolos filter default"
+    print(f"Verdict      : {verdict}\n")
+
+
+def cmd_watchlist(args):
+    conn = DB.connect(args.db)
+    if args.action == "add":
+        DB.watchlist_add(conn, args.address, args.label or "")
+        print(f"⭐ Added {args.address} ({args.label or 'no label'})")
+    elif args.action == "remove":
+        DB.watchlist_remove(conn, args.address)
+        print(f"🗑️  Removed {args.address}")
+    elif args.action == "list":
+        wl = DB.watchlist_all(conn)
+        print(f"\n⭐ WATCHLIST ({len(wl)})\n" + "-" * 60)
+        for w in wl:
+            print(f"  {short(w['wallet'])}  {w['label']}")
+        print()
+    elif args.action == "pnl":
+        wl = DB.watchlist_all(conn)
+        print(f"\n⭐ WATCHLIST PnL ({len(wl)})\n" + "-" * 78)
+        print(f"{'Wallet':<16}  {'Open val':>12}  {'Realized PnL':>14}  {'WinRate':>8}  Label")
+        for w in wl:
+            try:
+                s = score_wallet(w["wallet"])
+                print(f"{short(w['wallet']):<16}  {fmt_money(s['cur_value']):>12}  "
+                      f"{fmt_money(s['realized_pnl']):>14}  {s['winrate']*100:>6.0f}%  {w['label']}")
+            except Exception as e:
+                print(f"{short(w['wallet']):<16}  (error: {e})")
+        print()
+    conn.close()
+
+
+# ----------------------------- CLI -----------------------------
+def _add_filter_args(p, default_min):
+    p.add_argument("--min-usd", type=float, default=default_min)
+    p.add_argument("--lookback", type=int, default=500)
+    p.add_argument("--smart", action="store_true", help="hanya alert wallet smart-money")
+    p.add_argument("--min-pnl", type=float, default=1000)
+    p.add_argument("--min-winrate", type=float, default=0.5)
+    p.add_argument("--min-closed", type=int, default=5)
+    p.add_argument("--db", type=str, default="tracker.db")
+
+
 def main():
-    p = argparse.ArgumentParser(description="Polymarket Whale Tracker (read-only)")
+    p = argparse.ArgumentParser(description="Polymarket Whale Tracker v2 (read-only)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sc = sub.add_parser("scan", help="Sekali scan trade terbaru")
-    sc.add_argument("--min-usd", type=float, default=1000)
-    sc.add_argument("--lookback", type=int, default=500, help="jumlah trade terakhir yg diambil (max ~1000)")
-    sc.add_argument("--top", type=int, default=30)
-    sc.add_argument("--follow", type=str, default="")
+    sc = sub.add_parser("scan"); sc.add_argument("--min-usd", type=float, default=1000)
+    sc.add_argument("--lookback", type=int, default=500); sc.add_argument("--top", type=int, default=30)
     sc.set_defaults(func=cmd_scan)
 
-    wt = sub.add_parser("watch", help="Monitor real-time")
-    wt.add_argument("--min-usd", type=float, default=5000)
-    wt.add_argument("--interval", type=int, default=15)
-    wt.add_argument("--lookback", type=int, default=500)
-    wt.add_argument("--follow", type=str, default="")
+    wt = sub.add_parser("watch"); _add_filter_args(wt, 5000)
+    wt.add_argument("--interval", type=int, default=15); wt.add_argument("--follow", type=str, default="")
     wt.set_defaults(func=cmd_watch)
 
-    wl = sub.add_parser("wallet", help="Analisa 1 wallet")
-    wl.add_argument("address", type=str)
-    wl.set_defaults(func=cmd_wallet)
+    pl = sub.add_parser("poll"); _add_filter_args(pl, 5000)
+    pl.add_argument("--spike-usd", type=float, default=0, help="alert market kalau volume window >= ini")
+    pl.add_argument("--spike-window", type=int, default=30, help="menit")
+    pl.add_argument("--spike-trades", type=int, default=3)
+    pl.set_defaults(func=cmd_poll)
 
-    lb = sub.add_parser("leaderboard", help="Top trader by volume")
-    lb.add_argument("--lookback", type=int, default=1000)
-    lb.add_argument("--top", type=int, default=20)
-    lb.set_defaults(func=cmd_leaderboard)
+    wl = sub.add_parser("wallet"); wl.add_argument("address"); wl.set_defaults(func=cmd_wallet)
+
+    lb = sub.add_parser("leaderboard"); lb.add_argument("--lookback", type=int, default=1000)
+    lb.add_argument("--top", type=int, default=20); lb.set_defaults(func=cmd_leaderboard)
+
+    scr = sub.add_parser("score"); scr.add_argument("address"); scr.set_defaults(func=cmd_score)
+
+    wlc = sub.add_parser("watchlist")
+    wlc.add_argument("action", choices=["add", "remove", "list", "pnl"])
+    wlc.add_argument("address", nargs="?", default="")
+    wlc.add_argument("--label", type=str, default=""); wlc.add_argument("--db", type=str, default="tracker.db")
+    wlc.set_defaults(func=cmd_watchlist)
 
     args = p.parse_args()
     args.func(args)
